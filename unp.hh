@@ -667,11 +667,7 @@ int _TCPListen( char const* _Hostname
         } while ( ( _Results = _Results->ai_next ) != nullptr );
 
     if ( _Results == nullptr )
-        _ErrSys( ( std::string( "_TCPListen() failed for %s, %s" )
-                        + std::string( _Hostname )
-                        + std::string( _Serv )
-                 ).c_str()
-               );
+        _ErrSys( "_TCPListen() failed for %s, %s", _Hostname, _Serv );
 
     if ( listen( _ListenFd, MAXPENDING ) < 0 )
         _ErrSys( "listen() failed" );
