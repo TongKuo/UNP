@@ -648,7 +648,7 @@ int _TCPListen( char const* _Hostname
 
     int _ListenFd = 0;
     int const _On = 1;
-     do {
+    do  {
         _ListenFd = socket( _Results->ai_family
                           , _Results->ai_socktype
                           , _Results->ai_protocol
@@ -680,7 +680,209 @@ int _TCPListen( char const* _Hostname
     return _ListenFd;
     }
 
-#endif
+/*!
+ * \brief _UDPClient
+ * \param _Hostname
+ * \param _Serv
+ * \param _ptrSA
+ * \param _ptrLen
+ * \return
+ */
+int _UDPClient( char const* _Hostname
+              , char const* _Serv
+              , __SA* *_ptrSA
+              , socklen_t* _ptrLen
+              )
+    {
+    struct addrinfo _Hints;
+    bzero( &_Hints, sizeof( _Hints ) );
+    _Hints.ai_family = AF_UNSPEC;
+    _Hints.ai_socktype = SOCK_DGRAM;
+
+    int _RetVal = 0;
+    struct addrinfo* _Results = nullptr;
+    struct addrinfo* _ResultsSave = nullptr;
+
+    if ( ( _RetVal = getaddrinfo( _Hostname, _Serv, &_Hints, &_Results ) ) != 0 )
+        _ErrQuit( "_UDPClient() failed for %s, %s: %s"
+                , _Hostname, _Serv, gai_strerror( _RetVal )
+                );
+
+    _ResultsSave = _Results;
+
+    int _SockFd = 0;
+    do  {
+        _SockFd = socket( _Results->ai_family
+                        , _Results->ai_socktype
+                        , _Results->ai_protocol
+                        );
+        if ( _SockFd >= 0 )
+            break;      /* success */
+        } while ( ( _Results = _Results->ai_next ) != nullptr );
+
+    if ( _Results == nullptr )
+        _ErrSys( "_UDPClient() failed  for %s, %s", _Hostname, _Serv );
+
+    *_ptrSA = ( __SA* ) std::malloc( _Results->ai_addrlen );
+    std::memcpy( *_ptrSA, _Results->ai_addr, _Results->ai_addrlen );
+    *_ptrLen = _Results->ai_addrlen;
+
+    freeaddrinfo( _ResultsSave );
+
+    return _SockFd;
+    }
+
+/*!
+ * \brief _UDPConnect
+ * \param _Hostname
+ * \param _Serv
+ * \return
+ */
+int _UDPConnect( char const* _Hostname
+               , char const* _Serv
+               )
+    {
+    struct addrinfo _Hints;
+    bzero( &_Hints, sizeof( _Hints ) );
+    _Hints.ai_family = AF_UNSPEC;
+    _Hints.ai_socktype = SOCK_DGRAM;
+
+    int _RetVal = 0;
+    struct addrinfo* _Results = nullptr;
+    struct addrinfo* _ResultsSave = nullptr;
+    if ( ( _RetVal = getaddrinfo( _Hostname, _Serv, &_Hints, &_Results ) ) != 0 )
+        _ErrQuit( "_UDPConnect() failed for %s, %s: %s"
+                , _Hostname, _Serv, gai_strerror( _RetVal )
+                );
+
+    _ResultsSave = _Results;
+
+    int _SockFd = 0;
+    do  {
+        _SockFd = socket( _Results->ai_family
+                        , _Results->ai_socktype
+                        , _Results->ai_protocol
+                        );
+        if ( _SockFd < 0 )
+            continue;       /* ignore this one */
+        if ( connect( _SockFd, _Results->ai_addr, _Results->ai_addrlen ) == 0 )
+            break;          /* success */
+
+        close( _SockFd );
+        } while ( ( _Results = _Results->ai_next ) != nullptr );
+
+    if ( _Results == nullptr )
+        _ErrSys( "_UDPConnect() failed for %s, %s", _Hostname, _Serv );
+
+    freeaddrinfo( _ResultsSave );
+
+    return _SockFd;
+    }
+
+int _UDPServer( char const* _Hostname
+              , char const* _Serv
+              , socklen_t* _ptrAddrLen
+              )
+    {
+    struct addrinfo _Hints;
+    bzero( &_Hints, sizeof( _Hints ) );
+    _Hints.ai_flags = AI_PASSIVE;
+    _Hints.ai_family = AF_UNSPEC;
+    _Hints.ai_socktype = SOCK_DGRAM;
+
+    int _RetVal = 0;
+    struct addrinfo* _Results = nullptr;
+    struct addrinfo* _ResultsSave = nullptr;
+    if ( ( _RetVal = getaddrinfo( _Hostname, _Serv, &_Hints, &_Results ) ) != 0 )
+        _ErrQuit( "_UDPServer() failed for %s, %s: %s"
+                , _Hostname, _Serv, gai_strerror( _RetVal )
+                );
+
+    _ResultsSave = _Results;
+
+    int _SockFd = 0;
+    do  {
+        _SockFd = socket( _Results->ai_family
+                        , _Results->ai_socktype
+                        , _Results->ai_protocol
+                        );
+        if ( _SockFd < 0 )
+            _ErrSys( "socket() failed" );
+
+        if ( bind( _SockFd, _Results->ai_addr, _Results->ai_addrlen ) == 0 )
+            break;      /* success */
+
+        close( _SockFd );
+        } while ( ( _Results = _Results->ai_next ) != nullptr );
+
+    if ( _Results == nullptr )
+        _ErrSys( "_UDPServer() failed for %s, %s", _Hostname, _Serv );
+
+    if ( _ptrAddrLen )
+        *_ptrAddrLen = _Results->ai_addrlen;    /* return size of protocol address */
+
+    freeaddrinfo( _ResultsSave );
+
+    return _SockFd;
+    }
+
+#include <sys/syslog.h>
+
+int static const MAXFD = 64;
+int _DaemonProc;
+
+int _DaemonInit( char const* _ptrName, int _Facility )
+    {
+    pid_t _ProccessID = 0;
+    if ( ( _ProccessID = fork() ) < 0 )
+        return -1;
+    else
+        _exit( EXIT_SUCCESS );  /* Parent terminates */
+
+    /* Child 1 continues... */
+    if ( setsid() < 0 )
+        return -1;
+
+    struct sigaction _Action;
+    struct sigaction _OldAction;
+
+    _Action.sa_handler = SIG_IGN;
+    sigemptyset( &_Action.sa_mask );
+    _Action.sa_flags = 0;
+
+    if ( sigaction( SIGHUP, &_Action, &_OldAction ) < 0 )
+        return -1;
+
+    if ( ( _ProccessID = fork() ) < 0 )
+        return -1;
+    else if ( _ProccessID )
+        _exit( EXIT_SUCCESS );  /* Child 1 terminates */
+
+    /* Child 2 continues */
+
+    _DaemonProc = 1;
+
+    chdir( "/" );
+
+    /* close off file descriptors */
+    for ( int _Index = 0; _Index < MAXFD; _Index++ )
+        close( _Index );
+
+    /* Redirect stdin, stdout, and stderr to /dev/null */
+    open( "/dev/null", O_RDONLY );
+    open( "/dev/null", O_RDWR );
+    open( "/dev/null", O_RDWR );
+
+    openlog( _ptrName, LOG_PID, _Facility );
+    }
+
+void _DaemonInetd( char const* _ptrName, int _Facility )
+    {
+    _DaemonProc = 1;
+    openlog( _ptrName, LOG_PID, _Facility );
+    }
+
+#endif  // __UNP_HH_INCLUDED__
 
  ////////////////////////////////////////////////////////////////////////////
 
