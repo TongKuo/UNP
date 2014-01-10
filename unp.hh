@@ -68,6 +68,9 @@ typedef struct sockaddr __SA;
 
 static void	_ErrDoit(int, const char *, va_list);
 
+int _ReadableTimeOut( int _SockFd, int _Sec );
+int _WriteableTimeOut( int _SockFd, int _Sec );
+
 char	*pname = NULL;		/* caller can set this from argv[0] */
 
 /* Nonfatal error related to a system call.
@@ -779,6 +782,13 @@ int _UDPConnect( char const* _Hostname
     return _SockFd;
     }
 
+/*!
+ * \brief _UDPServer
+ * \param _Hostname
+ * \param _Serv
+ * \param _ptrAddrLen
+ * \return
+ */
 int _UDPServer( char const* _Hostname
               , char const* _Serv
               , socklen_t* _ptrAddrLen
@@ -831,6 +841,12 @@ int _UDPServer( char const* _Hostname
 int static const MAXFD = 64;
 int _DaemonProc;
 
+/*!
+ * \brief _DaemonInit
+ * \param _ptrName
+ * \param _Facility
+ * \return
+ */
 int _DaemonInit( char const* _ptrName, int _Facility )
     {
     pid_t _ProccessID = 0;
@@ -881,6 +897,214 @@ void _DaemonInetd( char const* _ptrName, int _Facility )
     _DaemonProc = 1;
     openlog( _ptrName, LOG_PID, _Facility );
     }
+
+void static _ConnectAlarm( int /*_SigNo*/ ) { return; }
+
+/*!
+ * \brief _ConnectTimeOut
+ * \param _SockFd
+ * \param _ptrSA
+ * \param _SALen
+ * \param _WaitSec
+ * \return
+ */
+int _ConnectTimeOut( int _SockFd
+                   , __SA const* _ptrSA
+                   , socklen_t _SALen
+                   , int _WaitSec
+                   )
+    {
+    struct sigaction _Action;
+    struct sigaction _OldAction;
+
+    _Action.sa_handler = _ConnectAlarm;
+    sigemptyset( &_Action.sa_mask );
+    _Action.sa_flags = 0;
+
+    if ( sigaction( SIGALRM, &_Action, &_OldAction ) < 0 )
+        return -1;
+
+    if ( alarm( _WaitSec ) != 0 )
+        _ErrMsg( "_ConnectTimeOut() failed: alarm was already set" );
+
+    int _ConnectRetVal = 0;
+    if ( ( _ConnectRetVal = connect( _SockFd, _ptrSA, _SALen ) ) < 0 )
+        {
+        close( _SockFd );
+
+        if ( errno == EINTR )
+            errno = ETIMEDOUT;
+        }
+
+    alarm( 0 );
+    if ( sigaction( SIGALRM, &_OldAction, nullptr ) < 0 )
+        return -1;
+
+    return _ConnectRetVal;
+    }
+
+//void static _SigAlrm( int /*_SigNo*/ ) { return; }
+
+/*!
+ * \brief _DGClient
+ * \param _ptrFile
+ * \param _SockFd
+ * \param _ptrServAddrStruct
+ * \param _ServStructLen
+ */
+void _DGClient( FILE* _ptrFile
+              , int _SockFd
+              , __SA const* _ptrServAddrStruct
+              , socklen_t _ServStructLen
+              )
+    {
+    int _RecvCnt = 0;
+    char _SendLine[ MAXLINE ];
+    char _RecvLine[ MAXLINE + 1 ];
+
+#if 1 /* By setsockopt() with SO_RCVTIMEDO */
+    struct timeval _TimeVal;
+    _TimeVal.tv_sec = 5;
+    _TimeVal.tv_usec = 0;
+    setsockopt( _SockFd, SOL_SOCKET, SO_RCVTIMEO, &_TimeVal, sizeof( _TimeVal ) );
+
+    while ( std::fgets( _SendLine, MAXLINE, _ptrFile ) != nullptr )
+        {
+        if ( sendto( _SockFd
+                   , _SendLine, std::strlen( _SendLine )
+                   , 0
+                   , _ptrServAddrStruct, _ServStructLen
+                   ) < 0 )
+            _ErrSys( "sendto() failed" );
+
+        _RecvCnt = recvfrom( _SockFd, _RecvLine, MAXLINE, 0, nullptr, nullptr );
+        if ( _RecvCnt < 0 )
+            {
+            if ( errno == EWOULDBLOCK )
+                {
+                std::fprintf( stderr, "socket timeout\n" );
+                continue;
+                }
+            else
+                _ErrSys( "recvfrom() failed" );
+            }
+
+        _RecvLine[ _RecvCnt ] = '\0';
+        std::fputs( _RecvLine, stdout );
+        }
+#endif
+
+#if 0 /* By select() */
+    while ( std::fgets( _SendLine, MAXLINE, _ptrFile ) != nullptr )
+        {
+        if ( sendto( _SockFd
+                   , _SendLine, std::strlen( _SendLine )
+                   , 0
+                   , _ptrServAddrStruct, _ServStructLen
+                   ) < 0 )
+            _ErrSys( "sendto() failed" );
+
+        if ( !_ReadableTimeOut( _SockFd, 5 ) )
+            std::fprintf( stderr, "socket timeout\n" );
+        else
+            {
+            _RecvCnt = recvfrom( _SockFd, _RecvLine, MAXLINE, 0, nullptr, nullptr );
+            _RecvLine[ _RecvCnt ] = '\0';
+            std::fputs( _RecvLine, stdout );
+            }
+        }
+#endif
+
+#if 0 /* By alarm() */
+    struct sigaction _Action;
+    struct sigaction _OldAction;
+
+    _Action.sa_handler = _SigAlrm;
+    sigemptyset( &_Action.sa_mask );
+    _Action.sa_flags = 0;
+
+    if ( sigaction( SIGALRM, &_Action, &_OldAction ) < 0 )
+        _ErrSys( "sigaction() failed" );
+
+    while ( std::fgets( _SendLine, MAXLINE, _ptrFile ) != nullptr )
+        {
+        if ( sendto( _SockFd
+                   , _SendLine, std::strlen( _SendLine )
+                   , 0
+                   , _ptrServAddrStruct, _ServStructLen
+                   ) < 0 )
+            _ErrSys( "sendto() failed" );
+
+        alarm( 5 );
+
+        if ( ( _RecvCnt = recvfrom( _SockFd
+                                  , _RecvLine, MAXLINE
+                                  , 0
+                                  , nullptr, nullptr
+                                  ) ) < 0 )
+            {
+            if ( errno == EINTR )
+                std::fprintf( stderr, "socket timeout\n" );
+            else
+                _ErrSys( "recvfrom() failed" );
+            }
+        else
+            {
+            alarm( 0 );
+            _RecvLine[ _RecvCnt ] = '\0';
+            std::fputs( _RecvLine, stdout );
+            }
+        }
+#endif
+    }
+
+/*!
+ * \brief _ReadableTimeOut
+ * \param _SockFd
+ * \param _Sec
+ * \return
+ */
+int _ReadableTimeOut( int _SockFd, int _Sec )
+    {
+    fd_set _ReadableSet;
+    struct timeval _TimeVal;
+
+    FD_ZERO( &_ReadableSet );
+    FD_SET( _SockFd, &_ReadableSet );
+
+    _TimeVal.tv_sec = _Sec;
+    _TimeVal.tv_usec = 0;
+
+    return select( _SockFd + 1
+                 , &_ReadableSet, nullptr, nullptr
+                 , &_TimeVal
+                 );
+    }
+
+/*!
+ * \brief _WriteableTimeOut
+ * \param _SockFd
+ * \param _Sec
+ * \return
+ */
+int _WriteableTimeOut( int _SockFd, int _Sec )
+    {
+    fd_set _WriteableSet;
+    struct timeval _TimeVal;
+
+    FD_ZERO( &_WriteableSet );
+    FD_SET( _SockFd, &_WriteableSet );
+
+    _TimeVal.tv_sec = _Sec;
+    _TimeVal.tv_usec = 0;
+
+    return select( _SockFd + 1
+                 , nullptr, &_WriteableSet, nullptr
+                 , &_TimeVal
+                 );
+    }
+
+#include <sys/uio.h>
 
 #endif  // __UNP_HH_INCLUDED__
 
