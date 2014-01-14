@@ -58,10 +58,13 @@
 #include	<sys/wait.h>
 #include	<sys/un.h>		/* for Unix domain sockets */
 
-size_t static const MAXLINE = 100;
+size_t static const MAXLINE = 4096;
 size_t static const MAXPENDING = 5;
+size_t static const BUFFSIZE = 8192;
 
 typedef struct sockaddr __SA;
+
+char const* UNIXSTR_PATH = "/tmp/fuck.unix";
 
 #include	<errno.h>		/* for definition of errno */
 #include	<stdarg.h>		/* ANSI C header file */
@@ -136,6 +139,17 @@ _ErrMsg(const char *fmt, ...)
 
 /* Fatal error unrelated to a system call.
  * Print a message and terminate. */
+
+void _ErrQuit( char const* __Des
+             , char const* __Total
+             )
+    {
+    std::cerr << __Des << ": "
+              << __Total
+              << std::endl;
+
+    std::exit( EXIT_FAILURE );
+    }
 
 void
 /* $f err_quit $ */
@@ -1105,6 +1119,219 @@ int _WriteableTimeOut( int _SockFd, int _Sec )
     }
 
 #include <sys/uio.h>
+
+ssize_t _ReadFd( int, void*, size_t, int* );
+
+/*!
+ * \brief _MyOpen
+ * \param _Pathname
+ * \param _Mode
+ * \return
+ */
+int _MyOpen( char const* _Pathname, int _Mode )
+    {
+    int _Fd = -1;
+    int _SockFd[2];
+    if ( socketpair( AF_LOCAL, SOCK_STREAM, 0, _SockFd ) < 0 )
+        _ErrSys( "socketpair() failed" );
+
+    char _ArgSockFd[10];
+    char _ArgMode[10];
+    pid_t _ChildProcessID;
+    if ( ( _ChildProcessID = fork() ) == 0 )    /* Child process */
+        {
+        close( _SockFd[0] );
+
+        std::snprintf( _ArgSockFd, sizeof( _ArgSockFd ), "%d", _SockFd[1] );
+        std::snprintf( _ArgMode, sizeof( _ArgMode ), "%d", _Mode );
+
+        execl( "./openfile", "openfile"
+             , _ArgSockFd, _Pathname, _ArgMode, ( char* ) nullptr
+             );
+
+        _ErrSys( "execl() failed" );
+        }
+
+    /* Parent process - wait for the child to terminate */
+    close( _SockFd[1] );    /* Close the end we don't use */
+
+    int _Status = 0;
+    waitpid( _ChildProcessID, &_Status, 0 );
+
+    if ( WIFEXITED( _Status ) == 0 )
+        _ErrQuit( "Child did not terminate" );
+
+    char _Char;
+    if ( ( _Status = WEXITSTATUS( _Status ) ) == 0 )
+        _ReadFd( _SockFd[0], &_Char, 1, &_Fd );
+    else
+        {
+        errno = _Status;    /* Set errno value from child's status */
+
+        _Fd = -1;
+        }
+
+    close( _SockFd[0] );
+    return _Fd;
+    }
+
+/*!
+ * \brief _ReadFd
+ * \param __Fd
+ * \param __ptr
+ * \param __BytesCnt
+ * \param __RecvFd
+ * \return
+ */
+ssize_t _ReadFd( int __Fd, void* __ptr, size_t __BytesCnt, int* __RecvFd )
+    {
+    struct msghdr _Msg;
+    struct iovec _Iov[1];
+
+    ssize_t _Cnt = 0;
+
+    union {
+        struct cmsghdr m_CM;
+        char   m_Control[ CMSG_SPACE( sizeof( int ) ) ];
+        } _ControlUnion;
+
+    struct cmsghdr* _ptrCM = nullptr;
+
+    _Msg.msg_control = _ControlUnion.m_Control;
+    _Msg.msg_controllen = sizeof( _ControlUnion.m_Control );
+    _Msg.msg_name = nullptr;
+    _Msg.msg_namelen = 0U;
+
+    _Iov[0].iov_base = __ptr;
+    _Iov[0].iov_len = __BytesCnt;
+    _Msg.msg_iov = _Iov;
+    _Msg.msg_iovlen = 1;
+
+    if ( ( _Cnt = recvmsg( __Fd, &_Msg, 0 ) ) < 0 )
+        return _Cnt;
+
+    if ( ( _ptrCM = CMSG_FIRSTHDR( &_Msg ) ) != nullptr
+            && _ptrCM->cmsg_len == CMSG_LEN( sizeof( int ) ) )
+        {
+        if ( _ptrCM->cmsg_level != SOL_SOCKET )
+            _ErrQuit( "Control level != SOL_SOCKET" );
+
+        if ( _ptrCM->cmsg_type != SCM_RIGHTS )
+            _ErrQuit( "Control type != SCM_RIGHTS" );
+
+        *__RecvFd = *( ( int * ) CMSG_DATA( _ptrCM ) );
+        }
+    else
+        *__RecvFd = -1; /* Descriptor was not passed */
+
+    return _Cnt;
+    }
+
+/*!
+ * \brief _WriteFd
+ * \param __Fd
+ * \param __ptr
+ * \param __SendFd
+ * \return
+ */
+ssize_t _WriteFd( int __Fd, void* __ptr, size_t /*__BytesCnt*/, int __SendFd )
+    {
+    struct msghdr _Msg;
+    struct iovec _Iov[1];
+
+    union {
+        struct cmsghdr m_CM;
+        char   m_Control[ CMSG_SPACE( sizeof( int ) ) ];
+        } _ControlUnion;
+
+    struct cmsghdr* _ptrCM;
+
+    _Msg.msg_control = _ControlUnion.m_Control;
+    _Msg.msg_controllen = sizeof( _ControlUnion.m_Control );
+
+    _ptrCM = CMSG_FIRSTHDR( &_Msg );
+    _ptrCM->cmsg_len = CMSG_LEN( sizeof( int ) );
+    _ptrCM->cmsg_level = SOL_SOCKET;
+    _ptrCM->cmsg_type = SCM_RIGHTS;
+    *( ( int* ) CMSG_DATA( _ptrCM ) ) = __SendFd;
+
+    _Msg.msg_name = nullptr;
+    _Msg.msg_namelen = 0;
+
+    _Iov[0].iov_base = __ptr;
+    _Iov[0].iov_len = 0;
+
+    _Msg.msg_iov = _Iov;
+    _Msg.msg_iovlen = 1;
+
+    return sendmsg( __Fd, &_Msg, 0 );
+    }
+
+int _Connect_nonb( int __SockFd
+                 , __SA const* __ptrSA
+                 , socklen_t __SALen
+                 , int __SecCnt
+                 )
+    {
+    int _Flags = fcntl( __SockFd, F_GETFL, 0 );
+    fcntl( __SockFd, F_SETFL, _Flags | O_NONBLOCK );
+
+    int _Error = 0;
+    int _Cnt = 0;
+    if ( ( _Cnt = connect( __SockFd, __ptrSA, __SALen ) ) < 0 )
+        if ( errno != EINPROGRESS )
+            return -1;
+
+    /* Do whatever we want while the connect is taking place. */
+
+    if ( !_Cnt )
+        goto _Done;     /* Connect completed immediately */
+
+    fd_set _ReadableSet;
+    fd_set _WriteableSet;
+    FD_ZERO( &_ReadableSet );
+    FD_ZERO( &_WriteableSet );
+
+    _WriteableSet = _ReadableSet;
+
+    struct timeval _TimeVal;
+    _TimeVal.tv_sec = __SecCnt;
+    _TimeVal.tv_usec = 0;
+
+    if ( ( _Cnt = select( __SockFd + 1
+                        , &_ReadableSet, &_WriteableSet, nullptr
+                        , __SecCnt ? &_TimeVal : nullptr
+                        ) ) == 0 )
+        {
+        close( __SockFd );  /* timeout */
+        errno = ETIMEDOUT;
+
+        return -1;
+        }
+
+    if ( FD_ISSET( __SockFd, &_ReadableSet )
+            || FD_ISSET( __SockFd, &_WriteableSet ) )
+        {
+        socklen_t _Len = sizeof( _Error );
+        if ( getsockopt( __SockFd, SOL_SOCKET, SO_ERROR, &_Error, &_Len ) < 0 )
+            return -1;
+        }
+    else
+        _ErrQuit( "select() failed", "__SockFd not set" );
+
+_Done:
+    fcntl( __SockFd, F_SETFL, _Flags ); /* Restore file status flags */
+
+    if ( _Error )
+        {
+        close( __SockFd );
+        errno = _Error;
+
+        return -1;
+        }
+
+    return 0;
+    }
 
 #endif  // __UNP_HH_INCLUDED__
 
